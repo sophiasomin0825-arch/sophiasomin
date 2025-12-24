@@ -14,7 +14,7 @@ import streamlit as st
 # =========================
 # Page / Global Style
 # =========================
-st.set_page_config(page_title="🌱 극지식물 최적 EC 농도 연구", layout="wide")
+st.set_page_config(page_title="🌱 극지식물 최적 EC/온도 연구", layout="wide")
 
 st.markdown(
     """
@@ -33,32 +33,35 @@ def apply_plotly_korean_font(fig: go.Figure) -> go.Figure:
     fig.update_layout(
         font=dict(family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans KR, sans-serif"),
         legend=dict(title=None),
-        margin=dict(l=30, r=30, t=60, b=40),
+        margin=dict(l=30, r=30, t=70, b=40),
     )
     return fig
 
 
 # =========================
-# Experiment constants
+# Experiment Constants (display & fallback)
 # =========================
 SCHOOL_ORDER = ["송도고", "하늘고", "아라고", "동산고"]
-TARGET_EC_BY_SCHOOL = {
-    "송도고": 1.0,
-    "하늘고": 2.0,  # 최적
-    "아라고": 4.0,
-    "동산고": 8.0,
-}
-COLOR_BY_SCHOOL = {
-    "송도고": "#2E86AB",
-    "하늘고": "#F39C12",  # 최적 강조
-    "아라고": "#27AE60",
-    "동산고": "#8E44AD",
-}
-OPTIMAL_EC = 2.0
+
+# 보고서(텍스트)에서 제시된 대표값(학교별 평균 추정치)
+# - 온도 평균: 송도 23.54, 동산 22.37, 하늘 18.18, 아라고 19.26
+# - EC 평균: 송도 0.72, 동산 1.11, 하늘 4.00, 아라고 7.82
+# - 생중량 평균: 하늘 3.94, 송도 3.73, 동산 3.53, 아라고 1.89
+REPORT_FALLBACK = pd.DataFrame(
+    {
+        "학교": ["송도고", "동산고", "하늘고", "아라고"],
+        "평균온도": [23.54, 22.37, 18.18, 19.26],
+        "평균EC": [0.72, 1.11, 4.00, 7.82],
+        "평균생중량": [3.73, 3.53, 3.94, 1.89],
+    }
+)
+
+# 사이드바에서 "학교 선택" 용(전체 포함)
+SCHOOL_SELECT = ["전체"] + SCHOOL_ORDER
 
 
 # =========================
-# Robust path & filename (NFC/NFD safe)
+# File / Unicode Robust
 # =========================
 def get_data_dir() -> Path:
     """
@@ -75,7 +78,7 @@ def get_data_dir() -> Path:
     if cand2.exists():
         return cand2
 
-    return cand1  # 기본
+    return cand1
 
 
 def _norm_all(s: str) -> set[str]:
@@ -86,48 +89,33 @@ def _norm_all(s: str) -> set[str]:
 
 
 def canonical_filename(name: str) -> str:
-    """
-    비교용 표준화:
-    - NFC 정규화
-    - 공백 제거
-    - 중복 확장자 보정(.csv.csv / .xlsx.xlsx)
-    """
     n = unicodedata.normalize("NFC", str(name)).strip()
     low = n.lower()
     if low.endswith(".csv.csv"):
-        n = n[:-4]  # 마지막 ".csv" 제거
+        n = n[:-4]
     if low.endswith(".xlsx.xlsx"):
-        n = n[:-5]  # 마지막 ".xlsx" 제거
+        n = n[:-5]
     return n
 
 
 def filename_match(candidate: str, desired: str) -> bool:
     c_nfc = canonical_filename(candidate)
     d_nfc = canonical_filename(desired)
-
     c_nfd = unicodedata.normalize("NFD", c_nfc)
     d_nfd = unicodedata.normalize("NFD", d_nfc)
 
-    # 완전일치
     if c_nfc == d_nfc or c_nfd == d_nfd:
         return True
-    # endswith 허용 (중복 확장자/경로차 흡수)
     if c_nfc.endswith(d_nfc) or c_nfd.endswith(d_nfd):
         return True
     return False
 
 
 def find_file_by_name(directory: Path, desired_name: str) -> Path | None:
-    """
-    pathlib.Path.iterdir()로만 탐색하며,
-    NFC/NFD 양방향 비교 + 중복확장자/endswith까지 흡수.
-    """
     if not directory.exists():
         return None
 
-    # desired도 NFC/NFD set로 한번 더 안전하게
     desired_norms = _norm_all(canonical_filename(desired_name))
-
     for p in directory.iterdir():
         if not p.is_file():
             continue
@@ -135,25 +123,17 @@ def find_file_by_name(directory: Path, desired_name: str) -> Path | None:
         cand_name = canonical_filename(p.name)
         cand_norms = _norm_all(cand_name)
 
-        # 1) NFC/NFD 교집합(완전일치급)
         if desired_norms.intersection(cand_norms):
             return p
-
-        # 2) 보강 매칭
         if filename_match(p.name, desired_name):
             return p
-
     return None
 
 
 # =========================
-# CSV read & column standardization
+# CSV Safety & Column Standardization
 # =========================
 def read_csv_safely(path: Path) -> pd.DataFrame:
-    """
-    한글 CSV 인코딩 이슈 방지:
-    utf-8-sig -> utf-8 -> cp949 -> euc-kr 순으로 시도
-    """
     encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr"]
     last_err = None
     for enc in encodings:
@@ -165,13 +145,6 @@ def read_csv_safely(path: Path) -> pd.DataFrame:
 
 
 def normalize_colname(c: str) -> str:
-    """
-    컬럼명 정규화:
-    - BOM 제거
-    - 소문자
-    - 공백 제거
-    - 기호 최소화
-    """
     c = unicodedata.normalize("NFC", str(c)).strip().lower()
     c = c.replace("\ufeff", "")
     c = re.sub(r"\s+", "", c)
@@ -181,7 +154,7 @@ def normalize_colname(c: str) -> str:
 
 def standardize_env_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    컬럼명이 살짝 달라도 time/temperature/humidity/ph/ec로 자동 정리
+    env: time, temperature, humidity, ph, ec 로 표준화
     """
     df2 = df.copy()
     colmap = {c: normalize_colname(c) for c in df2.columns}
@@ -218,7 +191,7 @@ def ensure_datetime(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
 
 
 # =========================
-# Growth helpers
+# Growth Helpers
 # =========================
 def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     cols = list(df.columns)
@@ -231,7 +204,7 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 
 # =========================
-# Data loading (cached)
+# Data Loading (cached)
 # =========================
 @st.cache_data(show_spinner=False)
 def load_environment_data(data_dir: Path) -> dict[str, pd.DataFrame]:
@@ -260,8 +233,6 @@ def load_environment_data(data_dir: Path) -> dict[str, pd.DataFrame]:
 def load_growth_data(data_dir: Path) -> tuple[pd.DataFrame, list[str], Path | None]:
     desired_name = "4개교_생육결과데이터.xlsx"
     xlsx_path = find_file_by_name(data_dir, desired_name)
-
-    # 업로드 환경에서 확장자가 중복되는 경우 대비
     if xlsx_path is None:
         xlsx_path = find_file_by_name(data_dir, "4개교_생육결과데이터.xlsx.xlsx")
 
@@ -269,7 +240,7 @@ def load_growth_data(data_dir: Path) -> tuple[pd.DataFrame, list[str], Path | No
         return pd.DataFrame(), [], None
 
     xls = pd.ExcelFile(xlsx_path)
-    sheet_names = list(xls.sheet_names)  # ✅ 시트명 하드코딩 금지
+    sheet_names = list(xls.sheet_names)  # 시트명 하드코딩 금지
 
     frames = []
     for sh in sheet_names:
@@ -282,69 +253,74 @@ def load_growth_data(data_dir: Path) -> tuple[pd.DataFrame, list[str], Path | No
 
 
 # =========================
-# Summaries
+# Metrics Builder (real data -> fallback)
 # =========================
-def env_summary(env_by_school: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    rows = []
-    for school in SCHOOL_ORDER:
-        df = env_by_school.get(school)
+def build_school_metrics(
+    env_by_school: dict[str, pd.DataFrame],
+    growth_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    학교별 평균온도/평균EC/평균생중량을 만든다.
+    - 가능하면 실제 CSV/XLSX에서 계산
+    - 부족하면 보고서 대표값으로 채움
+    """
+    # 1) 환경 평균 (실데이터)
+    env_rows = []
+    for s in SCHOOL_ORDER:
+        df = env_by_school.get(s)
         if df is None or df.empty:
             continue
-        row = {"학교": school}
-        for col in ["temperature", "humidity", "ph", "ec"]:
-            row[col] = pd.to_numeric(df.get(col, pd.Series(dtype=float)), errors="coerce").mean()
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def growth_summary(growth_df: pd.DataFrame) -> pd.DataFrame:
-    if growth_df is None or growth_df.empty:
-        return pd.DataFrame()
-
-    col_leaves = pick_col(growth_df, ["잎 수(장)", "잎수(장)", "잎 수", "잎수"])
-    col_shoot = pick_col(growth_df, ["지상부 길이(mm)", "지상부길이(mm)", "지상부 길이", "지상부길이"])
-    col_weight = pick_col(growth_df, ["생중량(g)", "생중량"])
-
-    if col_weight is None:
-        return pd.DataFrame()
-
-    df = growth_df.copy()
-    df[col_weight] = pd.to_numeric(df[col_weight], errors="coerce")
-    if col_leaves is not None:
-        df[col_leaves] = pd.to_numeric(df[col_leaves], errors="coerce")
-    if col_shoot is not None:
-        df[col_shoot] = pd.to_numeric(df[col_shoot], errors="coerce")
-
-    grp = df.groupby("학교", dropna=False)
-    rows = []
-    for school in SCHOOL_ORDER:
-        if school not in grp.groups:
+        if "temperature" not in df.columns or "ec" not in df.columns:
             continue
-        g = grp.get_group(school)
-        rows.append(
-            {
-                "학교": school,
-                "개체수": int(g.shape[0]),
-                "평균_생중량": float(g[col_weight].mean()),
-                "평균_잎수": float(g[col_leaves].mean()) if col_leaves else float("nan"),
-                "평균_지상부길이": float(g[col_shoot].mean()) if col_shoot else float("nan"),
-            }
-        )
-    return pd.DataFrame(rows)
+        t_mean = pd.to_numeric(df["temperature"], errors="coerce").mean()
+        ec_mean = pd.to_numeric(df["ec"], errors="coerce").mean()
+        env_rows.append({"학교": s, "평균온도": t_mean, "평균EC": ec_mean})
+    env_mean = pd.DataFrame(env_rows)
 
+    # 2) 생중량 평균 (실데이터)
+    g_mean = pd.DataFrame()
+    if growth_df is not None and not growth_df.empty and "학교" in growth_df.columns:
+        col_weight = pick_col(growth_df, ["생중량(g)", "생중량"])
+        if col_weight is not None:
+            tmp = growth_df.copy()
+            tmp[col_weight] = pd.to_numeric(tmp[col_weight], errors="coerce")
+            g_mean = (
+                tmp.groupby("학교", dropna=False)[col_weight]
+                .mean()
+                .reset_index()
+                .rename(columns={col_weight: "평균생중량"})
+            )
 
-def compute_optimal_ec_from_growth(gsum: pd.DataFrame) -> float | None:
-    if gsum is None or gsum.empty or "평균_생중량" not in gsum.columns:
-        return None
-    tmp = gsum.dropna(subset=["평균_생중량"]).copy()
-    if tmp.empty:
-        return None
-    best_school = tmp.sort_values("평균_생중량", ascending=False).iloc[0]["학교"]
-    return TARGET_EC_BY_SCHOOL.get(best_school)
+    # 3) 병합 후 누락은 fallback으로 채우기
+    m = pd.DataFrame({"학교": SCHOOL_ORDER})
+    if not env_mean.empty:
+        m = m.merge(env_mean, on="학교", how="left")
+    else:
+        m["평균온도"] = pd.NA
+        m["평균EC"] = pd.NA
+
+    if not g_mean.empty:
+        m = m.merge(g_mean, on="학교", how="left")
+    else:
+        m["평균생중량"] = pd.NA
+
+    # fallback join
+    fb = REPORT_FALLBACK.copy()
+    m = m.merge(fb, on="학교", how="left", suffixes=("", "_fb"))
+
+    for col in ["평균온도", "평균EC", "평균생중량"]:
+        m[col] = m[col].astype("float64")
+        fb_col = f"{col}_fb"
+        m[col] = m[col].fillna(m[fb_col])
+
+    m = m[["학교", "평균온도", "평균EC", "평균생중량"]]
+    m["학교"] = pd.Categorical(m["학교"], categories=SCHOOL_ORDER, ordered=True)
+    m = m.sort_values("학교").reset_index(drop=True)
+    return m
 
 
 # =========================
-# UI
+# Sidebar
 # =========================
 st.title("🌱 극지식물 최적 EC 농도 연구")
 
@@ -352,294 +328,180 @@ data_dir = get_data_dir()
 
 with st.sidebar:
     st.header("⚙️ 설정")
-    school_option = st.selectbox("학교 선택", ["전체"] + SCHOOL_ORDER, index=0)
+    school_option = st.selectbox("학교 선택", SCHOOL_SELECT, index=0)
 
-    # ✅ 디버그: data 폴더 실제 인식 확인
     with st.expander("🧪 디버그: data 폴더/파일 확인"):
         st.write("data_dir =", str(data_dir))
         if data_dir.exists():
-            st.write("files =", [p.name for p in data_dir.iterdir() if p.is_file()])
+            st.write([p.name for p in data_dir.iterdir() if p.is_file()])
         else:
             st.error("data 폴더를 찾지 못했습니다.")
 
 
+# =========================
+# Load Data
+# =========================
 with st.spinner("데이터를 불러오는 중..."):
     env_by_school = load_environment_data(data_dir)
     growth_df, sheet_names, growth_path = load_growth_data(data_dir)
 
-missing_env = [s for s in SCHOOL_ORDER if s not in env_by_school]
-if missing_env:
-    st.warning(f"환경 데이터가 없는 학교: {', '.join(missing_env)} (data/ 폴더 파일명 또는 인코딩/컬럼 확인)")
-
 if growth_df is None or growth_df.empty:
-    st.error("생육 결과 XLSX 데이터를 불러오지 못했습니다. data/ 폴더에 '4개교_생육결과데이터.xlsx'가 있는지 확인하세요.")
+    st.error("생육 결과 XLSX를 불러오지 못했습니다. data/에 '4개교_생육결과데이터.xlsx'가 있는지 확인하세요.")
     st.stop()
 
-env_sum = env_summary(env_by_school)
-grow_sum = growth_summary(growth_df)
-optimal_ec_from_data = compute_optimal_ec_from_growth(grow_sum)
+missing_env = [s for s in SCHOOL_ORDER if s not in env_by_school]
+if missing_env:
+    st.warning(f"환경 데이터가 없는 학교: {', '.join(missing_env)} (data/ 파일명 또는 인코딩/컬럼 확인)")
 
-total_individuals = int(growth_df.shape[0])
+metrics = build_school_metrics(env_by_school, growth_df)
 
-env_concat = []
-for s in SCHOOL_ORDER:
-    df = env_by_school.get(s)
-    if df is not None and not df.empty:
-        env_concat.append(df)
-env_all = pd.concat(env_concat, ignore_index=True) if env_concat else pd.DataFrame()
-avg_temp = pd.to_numeric(env_all.get("temperature", pd.Series(dtype=float)), errors="coerce").mean() if not env_all.empty else float("nan")
-avg_hum = pd.to_numeric(env_all.get("humidity", pd.Series(dtype=float)), errors="coerce").mean() if not env_all.empty else float("nan")
-
-tab1, tab2, tab3 = st.tabs(["📖 실험 개요", "🌡️ 환경 데이터", "📊 생육 결과"])
-
+# school filter
+metrics_show = metrics.copy()
+if school_option != "전체":
+    metrics_show = metrics_show[metrics_show["학교"] == school_option].copy()
 
 # =========================
-# Tab 1
+# Tabs (요구사항 3개)
 # =========================
+tab1, tab2, tab3 = st.tabs(
+    ["📖 실험 개요", "📊 학교별 온도·EC 막대그래프", "🔍 생중량·EC·온도 상관관계(융합)"]
+)
+
+# -------------------------
+# Tab 1: 실험개요 (보고서 기반)
+# -------------------------
 with tab1:
-    st.subheader("연구 배경 및 목적")
+    st.subheader("1) 실험 개요(보고서 요약 기반)")
     st.write(
         """
-본 연구는 4개 학교가 서로 다른 EC(양액 전기전도도) 조건에서 극지식물을 재배한 결과를 비교하여,
-**생육 지표(생중량·잎 수·길이)**가 가장 우수한 **최적 EC 농도**를 도출하는 것을 목표로 합니다.
+**대상 식물:** 극지 모델식물 ‘나도수영’  
+**목표:** 4개 고등학교에서 수집한 환경(온도·EC 등)과 생육(생중량 등) 데이터를 비교하여,
+극지식물이 가장 잘 자라는 **최적 환경 범위**를 규명한다.
 
-- 학교별 환경 데이터: 온도/습도/pH/EC의 시간 변화 및 평균 비교
-- 생육 결과 데이터: 학교(=EC 조건)별 생육 성과 비교 및 최적 조건 판단
+**핵심 결론(보고서):**
+- 극지식물은 대체로 **18~22℃** 범위에서 무난하게 자랐으며,
+- 특히 **EC 3~4 mS/cm** 구간에서 생중량이 최대이고,
+- 이번 데이터에서는 **온도보다 EC가 생육에 더 큰 영향**을 보였다.
 """
     )
 
-    st.subheader("학교별 EC 조건")
-    rows = []
-    for school in SCHOOL_ORDER:
-        n = int((growth_df["학교"] == school).sum()) if "학교" in growth_df.columns else 0
-        rows.append(
-            {
-                "학교명": school,
-                "EC 목표": TARGET_EC_BY_SCHOOL.get(school),
-                "개체수": n,
-                "색상": COLOR_BY_SCHOOL.get(school),
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-    st.subheader("주요 지표")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("총 개체수", f"{total_individuals:,} 개체")
-    c2.metric("평균 온도", "-" if pd.isna(avg_temp) else f"{avg_temp:.2f} °C")
-    c3.metric("평균 습도", "-" if pd.isna(avg_hum) else f"{avg_hum:.2f} %")
-    c4.metric("최적 EC", f"{OPTIMAL_EC:.1f} (하늘고)")
+    c1.metric("참여 학교", f"{len(SCHOOL_ORDER)}개")
+    c2.metric("최적 온도(보고서)", "18~22℃")
+    c3.metric("최적 EC(보고서)", "3~4 mS/cm")
+    # 데이터 기반으로도 최댓값(평균생중량 최대) 확인
+    best_row = metrics.sort_values("평균생중량", ascending=False).head(1)
+    if not best_row.empty:
+        best_school = str(best_row.iloc[0]["학교"])
+        best_w = float(best_row.iloc[0]["평균생중량"])
+        c4.metric("데이터 기준 생중량 1위", f"{best_w:.2f} g", best_school)
 
+    st.divider()
+    st.subheader("학교별 대표값(대시보드 계산용)")
+    st.dataframe(metrics, use_container_width=True)
 
-# =========================
-# Tab 2
-# =========================
+# -------------------------
+# Tab 2: 학교별 온도 & EC 막대그래프 (요구사항 2)
+# -------------------------
 with tab2:
-    st.subheader("학교별 환경 평균 비교")
-
-    if env_sum is None or env_sum.empty:
-        st.error("환경 데이터 평균을 계산할 수 없습니다. CSV 컬럼(time, temperature, humidity, ph, ec)을 확인하세요.")
+    st.subheader("2) 학교별 평균 온도와 평균 EC(막대그래프)")
+    if metrics_show.empty:
+        st.error("표시할 데이터가 없습니다.")
     else:
-        env_sum_plot = env_sum.copy()
-        env_sum_plot["학교"] = pd.Categorical(env_sum_plot["학교"], categories=SCHOOL_ORDER, ordered=True)
-        env_sum_plot = env_sum_plot.sort_values("학교")
-
         fig = make_subplots(
-            rows=2,
-            cols=2,
-            subplot_titles=("평균 온도", "평균 습도", "평균 pH", "목표 EC vs 실측 EC 비교(평균)"),
+            rows=1, cols=2,
+            subplot_titles=("평균 온도(℃)", "평균 EC(mS/cm)"),
         )
+        fig.add_trace(go.Bar(x=metrics_show["학교"], y=metrics_show["평균온도"], name="평균 온도"), row=1, col=1)
+        fig.add_trace(go.Bar(x=metrics_show["학교"], y=metrics_show["평균EC"], name="평균 EC"), row=1, col=2)
 
-        fig.add_trace(go.Bar(x=env_sum_plot["학교"], y=env_sum_plot["temperature"], name="평균 온도"), row=1, col=1)
-        fig.add_trace(go.Bar(x=env_sum_plot["학교"], y=env_sum_plot["humidity"], name="평균 습도"), row=1, col=2)
-        fig.add_trace(go.Bar(x=env_sum_plot["학교"], y=env_sum_plot["ph"], name="평균 pH"), row=2, col=1)
-
-        target_ec = [TARGET_EC_BY_SCHOOL.get(str(s), None) for s in env_sum_plot["학교"].astype(str)]
-        fig.add_trace(go.Bar(x=env_sum_plot["학교"], y=target_ec, name="목표 EC"), row=2, col=2)
-        fig.add_trace(go.Bar(x=env_sum_plot["학교"], y=env_sum_plot["ec"], name="실측 EC(평균)"), row=2, col=2)
-
-        fig.update_layout(barmode="group", height=650, title="학교별 환경 평균(요약)")
+        fig.update_layout(height=520, title="학교별 환경 조건 비교")
         fig = apply_plotly_korean_font(fig)
         st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-    st.subheader("선택한 학교 시계열")
-
-    ts_frames = []
-    for s in SCHOOL_ORDER:
-        df = env_by_school.get(s)
-        if df is None or df.empty:
-            continue
-        if "time" not in df.columns:
-            continue
-        tmp = df.copy()
-        tmp["학교"] = s
-        ts_frames.append(tmp)
-
-    ts_all = pd.concat(ts_frames, ignore_index=True) if ts_frames else pd.DataFrame()
-
-    if ts_all.empty:
-        st.error("시계열 그래프를 그릴 환경 데이터가 없습니다. CSV에 time 컬럼이 있는지 확인하세요.")
-    else:
-        ts_all = ensure_datetime(ts_all, "time")
-        ts_show = ts_all.copy() if school_option == "전체" else ts_all[ts_all["학교"] == school_option].copy()
-
-        for col in ["temperature", "humidity", "ec"]:
-            if col in ts_show.columns:
-                ts_show[col] = pd.to_numeric(ts_show[col], errors="coerce")
-
-        if "temperature" in ts_show.columns:
-            fig_t = px.line(ts_show, x="time", y="temperature",
-                            color="학교" if school_option == "전체" else None,
-                            title="온도 변화(시간)")
-            fig_t = apply_plotly_korean_font(fig_t)
-            st.plotly_chart(fig_t, use_container_width=True)
-
-        if "humidity" in ts_show.columns:
-            fig_h = px.line(ts_show, x="time", y="humidity",
-                            color="학교" if school_option == "전체" else None,
-                            title="습도 변화(시간)")
-            fig_h = apply_plotly_korean_font(fig_h)
-            st.plotly_chart(fig_h, use_container_width=True)
-
-        if "ec" in ts_show.columns:
-            fig_ec = px.line(ts_show, x="time", y="ec",
-                             color="학교" if school_option == "전체" else None,
-                             title="EC 변화(시간) - 목표 EC 기준선 포함")
-            if school_option == "전체":
-                fig_ec.add_hline(y=OPTIMAL_EC, line_dash="dash", annotation_text="최적 EC(2.0) 기준선")
-            else:
-                t = TARGET_EC_BY_SCHOOL.get(school_option)
-                if t is not None:
-                    fig_ec.add_hline(y=t, line_dash="dash", annotation_text=f"목표 EC({t})")
-            fig_ec = apply_plotly_korean_font(fig_ec)
-            st.plotly_chart(fig_ec, use_container_width=True)
-
-        with st.expander("📄 환경 데이터 원본 테이블 + CSV 다운로드"):
-            st.dataframe(ts_show, use_container_width=True)
-            csv_bytes = ts_show.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ CSV 다운로드", data=csv_bytes, file_name="환경데이터_원본.csv", mime="text/csv")
-
-
-# =========================
-# Tab 3
-# =========================
+# -------------------------
+# Tab 3: 생중량·EC·온도 상관관계(산점도 + 꺾은선 융합) (요구사항 3)
+# -------------------------
 with tab3:
-    st.subheader("🥇 핵심 결과")
+    st.subheader("3) 생중량·EC·온도 상관관계(산점도 + 꺾은선 융합 표현)")
 
-    col_weight = pick_col(growth_df, ["생중량(g)", "생중량"])
-    col_leaves = pick_col(growth_df, ["잎 수(장)", "잎수(장)", "잎 수", "잎수"])
-    col_shoot = pick_col(growth_df, ["지상부 길이(mm)", "지상부길이(mm)", "지상부 길이", "지상부길이"])
-
-    if col_weight is None:
-        st.error("생육 데이터에서 생중량 컬럼을 찾지 못했습니다. 컬럼명을 확인하세요.")
+    if metrics_show.empty:
+        st.error("표시할 데이터가 없습니다.")
         st.stop()
 
-    if grow_sum is not None and not grow_sum.empty:
-        best_row = grow_sum.dropna(subset=["평균_생중량"]).sort_values("평균_생중량", ascending=False).head(1)
-        if not best_row.empty:
-            best_school = best_row.iloc[0]["학교"]
-            best_ec = TARGET_EC_BY_SCHOOL.get(best_school)
-            best_w = best_row.iloc[0]["평균_생중량"]
+    # EC 기준 정렬(꺾은선 연결을 위해)
+    mline = metrics_show.copy()
+    mline = mline.sort_values("평균EC").reset_index(drop=True)
 
-            a, b, c = st.columns([1.2, 1.2, 2])
-            a.metric("데이터 기준 평균 생중량 최댓값", f"{best_w:.3f} g", f"{best_school} (EC {best_ec})")
-            b.metric("최적 EC (연구 결론)", f"{OPTIMAL_EC:.1f}", "하늘고(EC 2.0) 최적")
-            c.info("※ 최적 EC는 연구 설계상 **하늘고(EC 2.0)** 를 최적 조건으로 결론 내립니다.")
-
-    st.divider()
-    st.subheader("EC별 생육 비교 (2x2)")
-
-    gsum_plot = grow_sum.copy() if grow_sum is not None else pd.DataFrame()
-    if not gsum_plot.empty:
-        if school_option != "전체":
-            gsum_plot = gsum_plot[gsum_plot["학교"] == school_option]
-        gsum_plot["학교"] = pd.Categorical(gsum_plot["학교"], categories=SCHOOL_ORDER, ordered=True)
-        gsum_plot = gsum_plot.sort_values("학교")
-
-        fig2 = make_subplots(
-            rows=2,
-            cols=2,
-            subplot_titles=("평균 생중량 (⭐ 가장 중요)", "평균 잎 수", "평균 지상부 길이(mm)", "개체수 비교"),
-        )
-        fig2.add_trace(go.Bar(x=gsum_plot["학교"], y=gsum_plot["평균_생중량"], name="평균 생중량"), row=1, col=1)
-        fig2.add_trace(go.Bar(x=gsum_plot["학교"], y=gsum_plot["평균_잎수"], name="평균 잎 수"), row=1, col=2)
-        fig2.add_trace(go.Bar(x=gsum_plot["학교"], y=gsum_plot["평균_지상부길이"], name="평균 지상부 길이"), row=2, col=1)
-        fig2.add_trace(go.Bar(x=gsum_plot["학교"], y=gsum_plot["개체수"], name="개체수"), row=2, col=2)
-
-        fig2.update_layout(barmode="group", height=650, title="학교(=EC 조건)별 생육 비교")
-        fig2 = apply_plotly_korean_font(fig2)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.divider()
-    st.subheader("학교별 생중량 분포")
-
-    gdf = growth_df.copy()
-    gdf[col_weight] = pd.to_numeric(gdf[col_weight], errors="coerce")
-    if col_leaves is not None:
-        gdf[col_leaves] = pd.to_numeric(gdf[col_leaves], errors="coerce")
-    if col_shoot is not None:
-        gdf[col_shoot] = pd.to_numeric(gdf[col_shoot], errors="coerce")
-    if school_option != "전체":
-        gdf = gdf[gdf["학교"] == school_option].copy()
-
-    fig_box = px.violin(
-        gdf.dropna(subset=[col_weight]),
-        x="학교",
-        y=col_weight,
-        box=True,
-        points="all",
-        title="생중량 분포(바이올린 + 박스)",
-    )
-    fig_box = apply_plotly_korean_font(fig_box)
-    st.plotly_chart(fig_box, use_container_width=True)
-
-    st.divider()
-    st.subheader("상관관계 분석 (산점도 2개)")
-
-    left, right = st.columns(2)
+    left, right = st.columns([1.15, 1])
 
     with left:
-        if col_leaves is None:
-            st.warning("잎 수 컬럼을 찾지 못해 '잎 수 vs 생중량' 산점도를 생략합니다.")
-        else:
-            fig_sc1 = px.scatter(
-                gdf.dropna(subset=[col_leaves, col_weight]),
-                x=col_leaves,
-                y=col_weight,
-                color="학교" if school_option == "전체" else None,
-                title="잎 수 vs 생중량",
-                labels={col_leaves: "잎 수(장)", col_weight: "생중량(g)"},
-            )
-            fig_sc1 = apply_plotly_korean_font(fig_sc1)
-            st.plotly_chart(fig_sc1, use_container_width=True)
+        st.markdown("### ✅ 산점도(EC ↔ 생중량) + 온도 반영(마커 크기)")
+        fig_sc = px.scatter(
+            mline,
+            x="평균EC",
+            y="평균생중량",
+            color="학교",
+            size="평균온도",  # 온도까지 반영
+            hover_data={"평균온도": ":.2f", "평균EC": ":.2f", "평균생중량": ":.2f"},
+            labels={"평균EC": "평균 EC(mS/cm)", "평균생중량": "평균 생중량(g)", "평균온도": "평균 온도(℃)"},
+            title="EC-생중량 관계(온도까지 동시에 반영)",
+        )
+        # EC가 3~4 근처를 “권장 구간”으로 시각적 가이드(보고서 결론 반영)
+        fig_sc.add_vrect(x0=3, x1=4, opacity=0.15, annotation_text="권장 EC(3~4)", annotation_position="top left")
+        fig_sc = apply_plotly_korean_font(fig_sc)
+        st.plotly_chart(fig_sc, use_container_width=True)
 
     with right:
-        if col_shoot is None:
-            st.warning("지상부 길이 컬럼을 찾지 못해 '지상부 길이 vs 생중량' 산점도를 생략합니다.")
-        else:
-            fig_sc2 = px.scatter(
-                gdf.dropna(subset=[col_shoot, col_weight]),
-                x=col_shoot,
-                y=col_weight,
-                color="학교" if school_option == "전체" else None,
-                title="지상부 길이 vs 생중량",
-                labels={col_shoot: "지상부 길이(mm)", col_weight: "생중량(g)"},
-            )
-            fig_sc2 = apply_plotly_korean_font(fig_sc2)
-            st.plotly_chart(fig_sc2, use_container_width=True)
+        st.markdown("### ✅ 융합 꺾은선(이중축): x=EC / y1=생중량 / y2=온도")
+        fig_mix = make_subplots(specs=[[{"secondary_y": True}]])
 
-    with st.expander("📄 학교별 생육 데이터 원본 + XLSX 다운로드"):
-        st.dataframe(gdf, use_container_width=True)
-
-        buffer = io.BytesIO()
-        gdf.to_excel(buffer, index=False, engine="openpyxl")
-        buffer.seek(0)
-
-        st.download_button(
-            label="⬇️ XLSX 다운로드",
-            data=buffer,
-            file_name="생육데이터_원본.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        # 생중량(좌축)
+        fig_mix.add_trace(
+            go.Scatter(
+                x=mline["평균EC"],
+                y=mline["평균생중량"],
+                mode="lines+markers",
+                name="평균 생중량(g)",
+            ),
+            secondary_y=False,
         )
 
-st.caption("© Polar Plant EC Dashboard — Streamlit / Plotly")
+        # 온도(우축)
+        fig_mix.add_trace(
+            go.Scatter(
+                x=mline["평균EC"],
+                y=mline["평균온도"],
+                mode="lines+markers",
+                name="평균 온도(℃)",
+            ),
+            secondary_y=True,
+        )
+
+        # 권장 EC 구간 강조(3~4)
+        fig_mix.add_vrect(x0=3, x1=4, opacity=0.15, annotation_text="권장 EC(3~4)", annotation_position="top left")
+
+        fig_mix.update_xaxes(title_text="평균 EC(mS/cm)")
+        fig_mix.update_yaxes(title_text="평균 생중량(g)", secondary_y=False)
+        fig_mix.update_yaxes(title_text="평균 온도(℃)", secondary_y=True)
+        fig_mix.update_layout(height=520, title="EC를 기준으로 생중량·온도를 동시에 해석(융합)")
+        fig_mix = apply_plotly_korean_font(fig_mix)
+
+        st.plotly_chart(fig_mix, use_container_width=True)
+
+    st.divider()
+    st.subheader("해석 가이드(대시보드용)")
+    st.write(
+        """
+- **산점도**: x축 EC가 커질수록 생중량이 어떻게 변하는지 확인하면서, **온도(마커 크기)**까지 함께 비교합니다.  
+- **융합 꺾은선(이중축)**: 동일한 x축(EC) 위에서 **생중량(좌축)과 온도(우축)**를 동시에 보면,
+  ‘생중량 변화가 온도 때문인지, EC 때문인지’를 직관적으로 분리해 볼 수 있습니다.
+"""
+    )
+
+    with st.expander("📄 데이터 테이블 + CSV 다운로드"):
+        st.dataframe(mline, use_container_width=True)
+        csv_bytes = mline.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ CSV 다운로드", data=csv_bytes, file_name="학교별_요약지표.csv", mime="text/csv")
+
+st.caption("© Polar Plant Dashboard — Streamlit / Plotly")
